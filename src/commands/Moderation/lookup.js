@@ -14,9 +14,10 @@ import { handleInteractionError, TitanBotError, ErrorTypes } from '../../utils/e
 export default {
     data: new SlashCommandBuilder()
         .setName("lookup")
-        .setDescription("Roblox user lookup with groups, friends, safety + paging")
+        .setDescription("Roblox user lookup (profile, groups, friends)")
         .addStringOption(option =>
-            option.setName("userid")
+            option
+                .setName("userid")
                 .setDescription("Roblox User ID")
                 .setRequired(true)
         )
@@ -37,7 +38,7 @@ export default {
                 );
             }
 
-            // USER
+            // USER INFO
             const userRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
             if (!userRes.ok) throw new Error("User not found");
             const user = await userRes.json();
@@ -54,43 +55,51 @@ export default {
             const groupsData = groupsRes.ok ? await groupsRes.json() : { data: [] };
             const groups = (groupsData.data || []).slice(0, 10);
 
-            // FRIENDS (ALL FETCHED PAGE 1 ONLY SAFE)
-            const friendsRes = await fetch(
-                `https://friends.roblox.com/v1/users/${userId}/friends?limit=100`
-            );
-            const friendsData = friendsRes.ok ? await friendsRes.json() : { data: [] };
-            const friends = friendsData.data || [];
-
-            const friendsPerPage = 10;
+            // -----------------------
+            // FRIENDS (CURSOR BASED)
+            // -----------------------
+            let friendsCache = [];
+            let cursor = "";
             let page = 0;
 
-            const getFriendsPage = (p) => {
-                const start = p * friendsPerPage;
-                return friends.slice(start, start + friendsPerPage);
+            const fetchFriendsPage = async (c = "") => {
+                const url = new URL(`https://friends.roblox.com/v1/users/${userId}/friends`);
+                url.searchParams.set("limit", "50");
+                if (c) url.searchParams.set("cursor", c);
+
+                const res = await fetch(url.toString());
+                if (!res.ok) return { data: [], nextPageCursor: null };
+
+                return await res.json();
             };
 
-            const getFriendsEmbed = (p) => {
-                const slice = getFriendsPage(p);
+            const loadPage = async (pageIndex) => {
+                let c = "";
+                let data = null;
 
+                for (let i = 0; i <= pageIndex; i++) {
+                    data = await fetchFriendsPage(c);
+                    c = data.nextPageCursor;
+                    if (!c && i < pageIndex) break;
+                }
+
+                cursor = c;
+                friendsCache = data.data || [];
+
+                return data;
+            };
+
+            const buildFriendsEmbed = () => {
                 return infoEmbed(
-                    `👥 Friends (page ${p + 1}/${Math.ceil(friends.length / friendsPerPage) || 1})`,
-                    slice.length
-                        ? slice.map(f => `**${f.name}** (${f.displayName})`).join("\n")
+                    `👥 Friends (page ${page + 1})`,
+                    friendsCache.length
+                        ? friendsCache.map(f => `**${f.name}** (${f.displayName})`).join("\n")
                         : "no friends found"
                 );
             };
 
-            // SIMPLE SAFETY SCORE
-            let score = 50;
-            const accountAge = (Date.now() - new Date(user.created).getTime()) / 86400000;
-
-            if (accountAge > 365) score += 20;
-            if (accountAge < 30) score -= 25;
-            if (user.isBanned) score -= 40;
-            if (friends.length > 150) score += 10;
-            if (friends.length < 10) score -= 10;
-
-            score = Math.max(0, Math.min(100, score));
+            // INITIAL LOAD
+            await loadPage(0);
 
             const mainEmbed = infoEmbed(
                 `👤 Roblox Lookup`,
@@ -98,8 +107,7 @@ export default {
 **Display:** ${user.displayName}
 **ID:** ${user.id}
 **Created:** ${new Date(user.created).toLocaleString()}
-**Friends:** ${friends.length}
-**Banned:** ${user.isBanned ? "yes" : "no"}`
+**Friends loaded:** ${friendsCache.length}`
             ).setThumbnail(avatarUrl);
 
             const groupsEmbed = infoEmbed(
@@ -109,32 +117,6 @@ export default {
                     : "no groups found"
             );
 
-            const safetyEmbed = infoEmbed(
-                `🛡 Safety`,
-                `**Score:** ${score}/100
-Status: ${
-                    score >= 70 ? "🟢 normal" :
-                    score >= 40 ? "🟠 mixed" :
-                    "🔴 risky"
-                }`
-            );
-
-            const buildButtons = (p) => {
-                return new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`friends_prev_${userId}`)
-                        .setLabel("⬅ Prev")
-                        .setStyle(ButtonStyle.Secondary)
-                        .setDisabled(p === 0),
-
-                    new ButtonBuilder()
-                        .setCustomId(`friends_next_${userId}`)
-                        .setLabel("Next ➡")
-                        .setStyle(ButtonStyle.Secondary)
-                        .setDisabled((p + 1) * friendsPerPage >= friends.length)
-                );
-            };
-
             const menu = new ActionRowBuilder().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId(`lookup_${userId}`)
@@ -142,12 +124,25 @@ Status: ${
                     .addOptions([
                         { label: "profile", value: "main", emoji: "👤" },
                         { label: "groups", value: "groups", emoji: "🏷" },
-                        { label: "friends", value: "friends", emoji: "👥" },
-                        { label: "safety", value: "safety", emoji: "🛡" }
+                        { label: "friends", value: "friends", emoji: "👥" }
                     ])
             );
 
-            let msg = await interaction.reply({
+            const buttons = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`friends_prev_${userId}`)
+                    .setLabel("⬅ Prev")
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true),
+
+                new ButtonBuilder()
+                    .setCustomId(`friends_next_${userId}`)
+                    .setLabel("Next ➡")
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(!cursor)
+            );
+
+            const msg = await interaction.reply({
                 embeds: [mainEmbed],
                 components: [menu],
                 fetchReply: true
@@ -160,39 +155,52 @@ Status: ${
             collector.on("collect", async i => {
                 if (i.user.id !== interaction.user.id) return;
 
-                const val = i.customId;
-
-                // DROPDOWN SWITCH
+                // dropdown
                 if (i.isStringSelectMenu()) {
-                    const v = i.values[0];
+                    const val = i.values[0];
 
-                    if (v === "main") return i.update({ embeds: [mainEmbed], components: [menu] });
-                    if (v === "groups") return i.update({ embeds: [groupsEmbed], components: [menu] });
-                    if (v === "safety") return i.update({ embeds: [safetyEmbed], components: [menu] });
+                    if (val === "main") {
+                        return i.update({ embeds: [mainEmbed], components: [menu] });
+                    }
 
-                    if (v === "friends") {
+                    if (val === "groups") {
+                        return i.update({ embeds: [groupsEmbed], components: [menu] });
+                    }
+
+                    if (val === "friends") {
                         page = 0;
+                        await loadPage(page);
+
                         return i.update({
-                            embeds: [getFriendsEmbed(page)],
-                            components: [menu, buildButtons(page)]
+                            embeds: [buildFriendsEmbed()],
+                            components: [menu, buttons]
                         });
                     }
                 }
 
-                // FRIEND PAGINATION
-                if (val?.startsWith("friends_prev")) {
-                    page = Math.max(0, page - 1);
+                // friends next
+                if (i.customId === `friends_next_${userId}`) {
+                    if (!cursor) return;
+
+                    page++;
+                    await loadPage(page);
+
                     return i.update({
-                        embeds: [getFriendsEmbed(page)],
-                        components: [menu, buildButtons(page)]
+                        embeds: [buildFriendsEmbed()],
+                        components: [menu, buttons]
                     });
                 }
 
-                if (val?.startsWith("friends_next")) {
-                    page = page + 1;
+                // friends prev
+                if (i.customId === `friends_prev_${userId}`) {
+                    if (page === 0) return;
+
+                    page--;
+                    await loadPage(page);
+
                     return i.update({
-                        embeds: [getFriendsEmbed(page)],
-                        components: [menu, buildButtons(page)]
+                        embeds: [buildFriendsEmbed()],
+                        components: [menu, buttons]
                     });
                 }
             });
