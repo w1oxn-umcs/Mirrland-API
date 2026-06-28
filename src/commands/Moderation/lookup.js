@@ -2,19 +2,17 @@ import {
     SlashCommandBuilder,
     PermissionFlagsBits,
     ActionRowBuilder,
-    StringSelectMenuBuilder,
-    ButtonBuilder,
-    ButtonStyle
+    StringSelectMenuBuilder
 } from 'discord.js';
 
 import { infoEmbed } from '../../utils/embeds.js';
 import { logger } from '../../utils/logger.js';
-import { handleInteractionError, TitanBotError, ErrorTypes } from '../../utils/errorHandler.js';
+import { handleInteractionError } from '../../utils/errorHandler.js';
 
 export default {
     data: new SlashCommandBuilder()
         .setName("lookup")
-        .setDescription("Roblox user lookup (profile, groups, friends)")
+        .setDescription("Roblox user lookup (stable version)")
         .addStringOption(option =>
             option
                 .setName("userid")
@@ -30,17 +28,12 @@ export default {
             const userId = interaction.options.getString("userid");
 
             if (!userId || isNaN(userId)) {
-                throw new TitanBotError(
-                    "Invalid user id",
-                    ErrorTypes.USER_INPUT,
-                    "You must provide a valid Roblox user ID.",
-                    { subtype: "invalid_roblox_id" }
-                );
+                return interaction.reply({ content: "invalid user id", ephemeral: true });
             }
 
-            // USER INFO
+            // USER
             const userRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
-            if (!userRes.ok) throw new Error("User not found");
+            if (!userRes.ok) throw new Error("user not found");
             const user = await userRes.json();
 
             // AVATAR
@@ -50,56 +43,19 @@ export default {
             const avatar = await avatarRes.json();
             const avatarUrl = avatar?.data?.[0]?.imageUrl;
 
-            // GROUPS
-            const groupsRes = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
+            // GROUPS (REALISTIC LIMIT)
+            const groupsRes = await fetch(
+                `https://groups.roblox.com/v2/users/${userId}/groups/roles`
+            );
             const groupsData = groupsRes.ok ? await groupsRes.json() : { data: [] };
-            const groups = (groupsData.data || []).slice(0, 10);
 
-            // -----------------------
-            // FRIENDS (CURSOR BASED)
-            // -----------------------
-            let friendsCache = [];
-            let cursor = "";
-            let page = 0;
+            const groups = (groupsData.data || []).slice(0, 15);
 
-            const fetchFriendsPage = async (c = "") => {
-                const url = new URL(`https://friends.roblox.com/v1/users/${userId}/friends`);
-                url.searchParams.set("limit", "50");
-                if (c) url.searchParams.set("cursor", c);
-
-                const res = await fetch(url.toString());
-                if (!res.ok) return { data: [], nextPageCursor: null };
-
-                return await res.json();
-            };
-
-            const loadPage = async (pageIndex) => {
-                let c = "";
-                let data = null;
-
-                for (let i = 0; i <= pageIndex; i++) {
-                    data = await fetchFriendsPage(c);
-                    c = data.nextPageCursor;
-                    if (!c && i < pageIndex) break;
-                }
-
-                cursor = c;
-                friendsCache = data.data || [];
-
-                return data;
-            };
-
-            const buildFriendsEmbed = () => {
-                return infoEmbed(
-                    `👥 Friends (page ${page + 1})`,
-                    friendsCache.length
-                        ? friendsCache.map(f => `**${f.name}** (${f.displayName})`).join("\n")
-                        : "no friends found"
-                );
-            };
-
-            // INITIAL LOAD
-            await loadPage(0);
+            // FRIEND COUNT ONLY (THIS IS REAL)
+            const friendCountRes = await fetch(
+                `https://friends.roblox.com/v1/users/${userId}/friends/count`
+            );
+            const friendCountData = friendCountRes.ok ? await friendCountRes.json() : { count: 0 };
 
             const mainEmbed = infoEmbed(
                 `👤 Roblox Lookup`,
@@ -107,14 +63,24 @@ export default {
 **Display:** ${user.displayName}
 **ID:** ${user.id}
 **Created:** ${new Date(user.created).toLocaleString()}
-**Friends loaded:** ${friendsCache.length}`
+**Friends:** ${friendCountData.count}
+**Groups:** ${groups.length}+ shown`
             ).setThumbnail(avatarUrl);
 
             const groupsEmbed = infoEmbed(
                 `🏷 Groups`,
                 groups.length
                     ? groups.map(g => `**${g.group.name}** — ${g.role.name}`).join("\n")
-                    : "no groups found"
+                    : "no groups"
+            );
+
+            const socialEmbed = infoEmbed(
+                `👥 Social Overview`,
+                `**Friends count:** ${friendCountData.count}
+**Groups joined:** ${groups.length}+
+**Account age:** ${Math.floor((Date.now() - new Date(user.created)) / 86400000)} days
+
+note: roblox does not allow full friend list access via public API`
             );
 
             const menu = new ActionRowBuilder().addComponents(
@@ -124,22 +90,8 @@ export default {
                     .addOptions([
                         { label: "profile", value: "main", emoji: "👤" },
                         { label: "groups", value: "groups", emoji: "🏷" },
-                        { label: "friends", value: "friends", emoji: "👥" }
+                        { label: "social", value: "social", emoji: "👥" }
                     ])
-            );
-
-            const buttons = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`friends_prev_${userId}`)
-                    .setLabel("⬅ Prev")
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(true),
-
-                new ButtonBuilder()
-                    .setCustomId(`friends_next_${userId}`)
-                    .setLabel("Next ➡")
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(!cursor)
             );
 
             const msg = await interaction.reply({
@@ -148,66 +100,29 @@ export default {
                 fetchReply: true
             });
 
-            const collector = msg.createMessageComponentCollector({
-                time: 180000
-            });
+            const collector = msg.createMessageComponentCollector({ time: 120000 });
 
             collector.on("collect", async i => {
                 if (i.user.id !== interaction.user.id) return;
 
-                // dropdown
-                if (i.isStringSelectMenu()) {
-                    const val = i.values[0];
+                const v = i.values[0];
 
-                    if (val === "main") {
-                        return i.update({ embeds: [mainEmbed], components: [menu] });
-                    }
-
-                    if (val === "groups") {
-                        return i.update({ embeds: [groupsEmbed], components: [menu] });
-                    }
-
-                    if (val === "friends") {
-                        page = 0;
-                        await loadPage(page);
-
-                        return i.update({
-                            embeds: [buildFriendsEmbed()],
-                            components: [menu, buttons]
-                        });
-                    }
+                if (v === "main") {
+                    return i.update({ embeds: [mainEmbed], components: [menu] });
                 }
 
-                // friends next
-                if (i.customId === `friends_next_${userId}`) {
-                    if (!cursor) return;
-
-                    page++;
-                    await loadPage(page);
-
-                    return i.update({
-                        embeds: [buildFriendsEmbed()],
-                        components: [menu, buttons]
-                    });
+                if (v === "groups") {
+                    return i.update({ embeds: [groupsEmbed], components: [menu] });
                 }
 
-                // friends prev
-                if (i.customId === `friends_prev_${userId}`) {
-                    if (page === 0) return;
-
-                    page--;
-                    await loadPage(page);
-
-                    return i.update({
-                        embeds: [buildFriendsEmbed()],
-                        components: [menu, buttons]
-                    });
+                if (v === "social") {
+                    return i.update({ embeds: [socialEmbed], components: [menu] });
                 }
             });
 
         } catch (err) {
-            logger.error("lookup error:", err);
-            await handleInteractionError(interaction, err, {
+            logger.error(err);
+            return handleInteractionError(interaction, err, {
                 subtype: "lookup_failed"
             });
         }
