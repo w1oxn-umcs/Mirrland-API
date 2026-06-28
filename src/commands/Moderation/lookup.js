@@ -1,103 +1,67 @@
 import { SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
-import { createEmbed } from '../../utils/embeds.js';
+import { createEmbed, errorEmbed, successEmbed, infoEmbed, warningEmbed } from '../../utils/embeds.js';
 import { logger } from '../../utils/logger.js';
-import { ModerationService } from '../../services/moderationService.js';
-import { handleInteractionError } from '../../utils/errorHandler.js';
+import { InteractionHelper } from '../../utils/interactionHelper.js';
+import { handleInteractionError, TitanBotError, ErrorTypes } from '../../utils/errorHandler.js';
 
 export default {
     data: new SlashCommandBuilder()
         .setName("lookup")
-        .setDescription("Look up a moderation case or user history")
-        .addUserOption(option =>
+        .setDescription("Look up a Roblox user by User ID")
+        .addStringOption((option) =>
             option
-                .setName("user")
-                .setDescription("User to look up")
-                .setRequired(false)
+                .setName("userid")
+                .setDescription("The Roblox User ID")
+                .setRequired(true),
         )
-        .addStringOption(option =>
-            option
-                .setName("case")
-                .setDescription("Case ID to look up")
-                .setRequired(false)
-        )
-        .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+        .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
-    category: "moderation",
+    category: "utility",
 
     async execute(interaction, config, client) {
         try {
+            const userId = interaction.options.getString("userid");
 
-            // ✅ FIX: prevents "thinking forever"
-            await interaction.deferReply({ ephemeral: true });
-
-            const user = interaction.options.getUser("user");
-            const caseId = interaction.options.getString("case");
-
-            let result;
-
-            // 🔎 CASE LOOKUP
-            if (caseId) {
-                result = await ModerationService.getCase(caseId);
+            if (!userId || isNaN(userId)) {
+                throw new TitanBotError(
+                    'Invalid user id',
+                    ErrorTypes.USER_INPUT,
+                    'You must provide a valid Roblox user ID.',
+                    { subtype: 'invalid_roblox_id' },
+                );
             }
 
-            // 👤 USER LOOKUP
-            else if (user) {
-                result = await ModerationService.getUserCases(user.id, interaction.guild.id);
+            // fetch roblox profile
+            const userRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
+            if (!userRes.ok) {
+                throw new Error("Roblox user not found.");
             }
+            const userData = await userRes.json();
 
-            else {
-                return interaction.editReply({
-                    embeds: [
-                        createEmbed(
-                            "❌ Missing Input",
-                            "You must provide either a **user** or a **case ID**.",
-                            "error"
-                        )
-                    ]
-                });
-            }
+            // fetch avatar headshot
+            const avatarRes = await fetch(
+                `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png&isCircular=false`
+            );
+            const avatarData = await avatarRes.json();
+            const avatarUrl = avatarData?.data?.[0]?.imageUrl || null;
 
-            if (!result) {
-                return interaction.editReply({
-                    embeds: [
-                        createEmbed(
-                            "🔍 No Results",
-                            "No moderation data found.",
-                            "warning"
-                        )
-                    ]
-                });
-            }
+            // try creation date formatting
+            const created = userData.created
+                ? new Date(userData.created).toLocaleString()
+                : "Unknown";
 
-            // 📦 CASE RESULT
-            if (caseId) {
-                return interaction.editReply({
-                    embeds: [
-                        createEmbed(
-                            `📄 Case #${caseId}`,
-                            `**Action:** ${result.action}\n**User:** <@${result.userId}>\n**Moderator:** <@${result.moderatorId}>\n**Reason:** ${result.reason}\n**Date:** ${result.date}`,
-                            "info"
-                        )
-                    ]
-                });
-            }
-
-            // 👤 USER RESULT
-            const casesText = result
-                .slice(0, 10)
-                .map(c =>
-                    `**#${c.caseId}** | ${c.action} | ${c.reason}`
-                )
-                .join("\n");
-
-            return interaction.editReply({
+            await InteractionHelper.universalReply(interaction, {
                 embeds: [
-                    createEmbed(
-                        `🔎 User Lookup: ${user.tag}`,
-                        casesText || "No moderation history found.",
-                        "info"
-                    )
-                ]
+                    infoEmbed(
+                        `👤 Roblox User Lookup`,
+                        `**Username:** ${userData.name}
+**Display Name:** ${userData.displayName}
+**User ID:** ${userData.id}
+**Description:** ${userData.description || "None"}
+**Account Created:** ${created}
+**Banned:** ${userData.isBanned ? "Yes" : "No"}`,
+                    ).setThumbnail(avatarUrl),
+                ],
             });
 
         } catch (error) {
