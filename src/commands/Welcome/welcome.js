@@ -3,32 +3,30 @@ import { getWelcomeConfig } from "../../utils/database.js";
 export default {
     name: "guildMemberAdd",
 
-    async execute(member, client) {
+    async execute(member) {
         try {
-            const config = await getWelcomeConfig(client, member.guild.id);
+            const config = await getWelcomeConfig(member.client, member.guild.id);
 
             if (!config?.enabled || !config.channelId) return;
 
-            const channel = member.guild.channels.cache.get(config.channelId);
+            const channel = await member.guild.channels.fetch(config.channelId).catch(() => null);
             if (!channel) return;
 
-            const content = config.welcomePing
-                ? `<@${member.id}>`
-                : null;
-
             const msg = await channel.send({
-                content: content || config.welcomeMessage?.replace("{user}", member.user.username)
+                content: `<@${member.id}>`
             });
 
-            // if ping mode → delete instantly
-            if (config.welcomePing) {
-                setImmediate(() => {
-                    msg.delete().catch(() => {});
-                });
-            }
+            // guaranteed attempt delete
+            setTimeout(async () => {
+                try {
+                    await msg.delete();
+                } catch (err) {
+                    console.error("[Welcome Delete Failed]", err.message);
+                }
+            }, 50);
 
         } catch (err) {
-            console.error("[Welcome] error:", err);
+            console.error("[Welcome Ping] error:", err);
         }
     }
 };
