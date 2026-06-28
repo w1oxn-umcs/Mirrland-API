@@ -1,1 +1,0 @@
-channel.send(`<@${member.id}>`);
