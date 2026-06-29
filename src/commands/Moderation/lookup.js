@@ -43,7 +43,7 @@ export default {
             const avatar = await avatarRes.json();
             const avatarUrl = avatar?.data?.[0]?.imageUrl;
 
-            // GROUPS (REALISTIC LIMIT)
+            // GROUPS
             const groupsRes = await fetch(
                 `https://groups.roblox.com/v2/users/${userId}/groups/roles`
             );
@@ -51,11 +51,37 @@ export default {
 
             const groups = (groupsData.data || []).slice(0, 15);
 
-            // FRIEND COUNT ONLY (THIS IS REAL)
+            // FRIEND COUNT
             const friendCountRes = await fetch(
                 `https://friends.roblox.com/v1/users/${userId}/friends/count`
             );
             const friendCountData = friendCountRes.ok ? await friendCountRes.json() : { count: 0 };
+
+            // FRIEND LIST (FULL + PAGINATED)
+            let friends = [];
+            let cursor = undefined;
+
+            while (true) {
+                const url = cursor
+                    ? `https://friends.roblox.com/v1/users/${userId}/friends?limit=100&cursor=${cursor}`
+                    : `https://friends.roblox.com/v1/users/${userId}/friends?limit=100`;
+
+                const res = await fetch(url);
+                if (!res.ok) break;
+
+                const data = await res.json();
+
+                friends.push(...(data.data || []));
+
+                cursor = data.nextPageCursor;
+                if (!cursor) break;
+            }
+
+            const friendListText = friends.length
+                ? friends.slice(0, 30).map(f =>
+                    `**${f.displayName || "Unknown"}** (@${f.name || "Unknown"})`
+                ).join("\n")
+                : "no friends found";
 
             const mainEmbed = infoEmbed(
                 `👤 Roblox Lookup`,
@@ -66,6 +92,11 @@ export default {
 **Friends:** ${friendCountData.count}
 **Groups:** ${groups.length}+ shown`
             ).setThumbnail(avatarUrl);
+
+            const friendsEmbed = infoEmbed(
+                `👥 Friends`,
+                friendListText
+            );
 
             const groupsEmbed = infoEmbed(
                 `🏷 Groups`,
@@ -78,9 +109,7 @@ export default {
                 `👥 Social Overview`,
                 `**Friends count:** ${friendCountData.count}
 **Groups joined:** ${groups.length}+
-**Account age:** ${Math.floor((Date.now() - new Date(user.created)) / 86400000)} days
-
-note: roblox does not allow full friend list access via public API`
+**Account age:** ${Math.floor((Date.now() - new Date(user.created)) / 86400000)} days`
             );
 
             const menu = new ActionRowBuilder().addComponents(
@@ -89,8 +118,9 @@ note: roblox does not allow full friend list access via public API`
                     .setPlaceholder("select panel")
                     .addOptions([
                         { label: "profile", value: "main", emoji: "👤" },
+                        { label: "friends", value: "friends", emoji: "👥" },
                         { label: "groups", value: "groups", emoji: "🏷" },
-                        { label: "social", value: "social", emoji: "👥" }
+                        { label: "social", value: "social", emoji: "📊" }
                     ])
             );
 
@@ -109,6 +139,10 @@ note: roblox does not allow full friend list access via public API`
 
                 if (v === "main") {
                     return i.update({ embeds: [mainEmbed], components: [menu] });
+                }
+
+                if (v === "friends") {
+                    return i.update({ embeds: [friendsEmbed], components: [menu] });
                 }
 
                 if (v === "groups") {
